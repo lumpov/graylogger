@@ -3,10 +3,10 @@
 const term = require('terminal-kit').terminal;
 const moment = require('moment');
 const stringz = require('stringz'); // for emoji support ❤️
-const request = require('request');
-const stringify = require('circular-json').stringify;
+const fetch = require('node-fetch');
+const { stringify } = require('flatted');
 var PrettyError;
-var pe = {};
+var pe;
 
 const gelfLevel = {
   log: 1,
@@ -20,10 +20,13 @@ const gelfLevel = {
 /*
 .init({enable: ['log', 'debug', 'info', 'warn', 'error'], PrettyError: true})
 */
-module.exports.init = opt => {
-  (opt.enable || ['debug', 'log', 'info', 'warn', 'error']).forEach(type => {
+module.exports.init = (opt) => {
+  (opt.enable || ['debug', 'log', 'info', 'warn', 'error']).forEach((type) => {
     module.exports.makeSimpleLogger(type);
   });
+
+  module.exports.options.quitOnException =
+    opt.quitOnException == undefined ? true : opt.quitOnException;
 
   if (opt.PrettyError) {
     PrettyError = require('pretty-error');
@@ -32,24 +35,29 @@ module.exports.init = opt => {
     pe.skipPackage('loader.js', 'chai', 'when');
     pe.skipPath(
       'internal/main/run_main_module.js',
-      'internal/modules/cjs/loader.js',
-      'internal/modules/cjs/helpers.js'
+      'internal/modules/cjs/loader',
+      'node:internal/modules/cjs/loader',
+      'internal/modules/cjs/helpers.js',
+      'node:internal/main/run_main_module',
+      'node:internal/modules/run_main',
+      'node:diagnostics_channel'
     );
   }
 };
 
 // graylog init
-module.exports.grayLog = opt => {
+module.exports.grayLog = (opt) => {
   module.exports.options.grayLog = {
     logHost: opt.logHost || null,
     host: opt.host || null,
+    protocol: opt.protocol || 'http',
     port: opt.port || 12201,
     path: opt.path || '/gelf',
     scope: opt.configureScope || null,
     reservedKeys: opt.reservedKeys || [],
   };
 
-  (opt.enable || ['debug', 'log', 'warn', 'error']).forEach(type => {
+  (opt.enable || ['debug', 'log', 'warn', 'error']).forEach((type) => {
     module.exports.enableGraylog(type);
   });
 };
@@ -60,23 +68,23 @@ module.exports.nativeError = global.console.error;
 
 // enables or disables certain types of logging
 var loggerTypes = {};
-module.exports.enable = type => {
+module.exports.enable = (type) => {
   module.exports.options.styles[type] = module.exports.options.styles[type] || [
     term,
     module.exports.nativeLog,
   ];
   loggerTypes[type] = true;
 };
-module.exports.disable = type => (loggerTypes[type] = false);
-module.exports.isEnabled = type => loggerTypes[type];
+module.exports.disable = (type) => (loggerTypes[type] = false);
+module.exports.isEnabled = (type) => loggerTypes[type];
 
 // enables or disables certain types of logging
 var loggerTypesGraylog = {};
-module.exports.enableGraylog = type => {
+module.exports.enableGraylog = (type) => {
   loggerTypesGraylog[type] = true;
 };
-module.exports.disableGraylog = type => (loggerTypesGraylog[type] = false);
-module.exports.isEnabledGraylog = type => loggerTypesGraylog[type];
+module.exports.disableGraylog = (type) => (loggerTypesGraylog[type] = false);
+module.exports.isEnabledGraylog = (type) => loggerTypesGraylog[type];
 
 module.exports.options = {
   typePadding: '     ', // dictates the width of the type prefix
@@ -90,18 +98,16 @@ module.exports.options = {
   },
   // a function that takes a date and returns a string
   // used to print the date in the prefix
-  dateFormatter: date => moment(date).format('HH:mm:ss.SSS'),
+  dateFormatter: (date) => moment(date).format('HH:mm:ss.SSS'),
   quitOnException: true,
-  grayLog: {
-    enabled: false,
-  },
+  grayLog: {},
 };
 
-const getLogTypePrefix = type =>
+const getLogTypePrefix = (type) =>
   ` [${type}] ${module.exports.options.typePadding.substring(
     stringz.length(type) + 4
   )}`;
-const getPrefix = type =>
+const getPrefix = (type) =>
   getLogTypePrefix(type) +
   module.exports.options.dateFormatter(new Date()) +
   ' ';
@@ -140,6 +146,11 @@ function prepareLog(message) {
     result.push(message);
   }
 
+  // module.exports.nativeLog(
+  //   'prepareLog: ',
+  //   Object.prototype.toString.call(message), { result }
+  // );
+
   return result; //result.length <= 1 ? result.join() :
 }
 
@@ -162,7 +173,7 @@ function simpleLogger(logData) {
         for (let k = 0; k < keys.length; k++) {
           if (
             module.exports.options.grayLog.reservedKeys.find(
-              reservedKey => reservedKey == keys[k]
+              (reservedKey) => reservedKey == keys[k]
             )
           ) {
             delete message[keys[k]];
@@ -170,7 +181,7 @@ function simpleLogger(logData) {
         }
       }
     }
-    if (Object.keys(message).length) {
+    if (Object.keys(message || {}).length) {
       locMsg.push(...['\n'], ...prepareLog(message));
     }
   }
@@ -186,9 +197,9 @@ function simpleLogger(logData) {
   sendHTTPGelf(logData);
 }
 
-module.exports.makeSimpleLogger = type => {
+module.exports.makeSimpleLogger = (type) => {
   module.exports.enable(type);
-  global.console[type] = function() {
+  global.console[type] = function () {
     simpleLogger({
       messageType: type,
       messages: arguments,
@@ -199,7 +210,7 @@ module.exports.makeSimpleLogger = type => {
 
 module.exports.makeCustomLogger = (type, myfunction) => {
   module.exports.enable(type);
-  global.console[type] = function() {
+  global.console[type] = function () {
     if (loggerTypes[type]) {
       myfunction.apply(this, arguments);
     }
@@ -235,8 +246,9 @@ function sendHTTPGelf(logData) {
       peRender.shift();
       locMsg.full_message = peRender.join('\n');
     } else {
-      locMsg.short_message = `Error: ${logData.messages[0].code || ''} ${logData
-        .messages[0].message || logData.messages[0]}`;
+      locMsg.short_message = `Error: ${logData.messages[0].code || ''} ${
+        logData.messages[0].message || logData.messages[0]
+      }`;
       locMsg.full_message = '';
 
       if (logData.messages[0].hasOwnProperty('stack')) {
@@ -257,7 +269,7 @@ function sendHTTPGelf(logData) {
     if (
       Object.prototype.toString.call(logData.messages[i]) === '[object Object]'
     ) {
-      Object.keys(logData.messages[i]).forEach(key => {
+      Object.keys(logData.messages[i]).forEach((key) => {
         locMsg[`_${key}`] = prepareLog(logData.messages[i][key]).join('\n');
       });
     } else {
@@ -271,38 +283,30 @@ function sendHTTPGelf(logData) {
     Object.assign(locMsg, module.exports.options.grayLog.scope());
   }
 
-  const options = {
-    uri: `http://${module.exports.options.grayLog.host}:${module.exports.options.grayLog.port}${module.exports.options.grayLog.path}`,
+  const url = `${module.exports.options.grayLog.protocol}://${module.exports.options.grayLog.host}:${module.exports.options.grayLog.port}${module.exports.options.grayLog.path}`;
+
+  // module.exports.nativeLog('>>> locMsg:', locMsg)
+
+  fetch(url, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(locMsg),
     timeout: 1500,
-    json: true,
-    body: locMsg,
-  };
-
-  //module.exports.nativeLog('>>> locMsg:', locMsg)
-
-  request.debug = false;
-
-  // eslint-disable-next-line no-unused-vars
-  request(options, function(error, response, body) {
-    if (error) {
-      //return console.error(error);
-      //module.exports.nativeLog('sendHTTPGelf: error: ', error);
-    }
-    //console.log('Upload successful!  Server responded with:', body);
-    //module.exports.nativeLog('sendHTTPGelf() response: ', {
-    //options,
-    //statusCode: response.statusCode,
-    //body,
-    //});
-  });
+    redirect: 'follow',
+  })
+    .then((response) => {
+      // module.exports.nativeLog('sendHTTPGelf() response:', response.status);
+    })
+    .catch((error) => {
+      // module.exports.nativeLog('sendHTTPGelf error:', error.message);
+    });
 }
 
 const exception = {
   // todo: add info about host, environment to messages
   handler(err) {
     console.error(err);
-    if (module.exports.options.grayLog.quitOnException) process.exit(1);
+    if (module.exports.options.quitOnException) process.exit(1);
   },
 };
 
