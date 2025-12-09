@@ -4,7 +4,7 @@ const term = require('terminal-kit').terminal;
 const moment = require('moment');
 const stringz = require('stringz'); // for emoji support ❤️
 const fetch = require('node-fetch');
-const { stringify } = require('flatted');
+const stringify = require('safe-stable-stringify');
 var PrettyError;
 var pe;
 
